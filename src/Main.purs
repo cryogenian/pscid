@@ -1,4 +1,4 @@
-module Main where
+module MainOld where
 
 import Prelude
 import Control.Monad.Eff.Console as Console
