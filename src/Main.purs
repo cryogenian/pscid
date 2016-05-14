@@ -1,176 +1,127 @@
-module MainOld where
+module Main where
 
-import Prelude
-import Control.Monad.Eff.Console as Console
-import Node.Process as Process
-import Ansi.Codes (Color(Green, Red))
-import Ansi.Output (foreground, withGraphics)
-import Control.Apply ((*>))
-import Control.Bind ((=<<))
-import Control.Monad (when)
-import Control.Monad.Aff (attempt, runAff, launchAff, later')
-import Control.Monad.Aff.AVar (AVAR)
+import Blessed
+import Node.Process as P
+import Control.Monad.Aff (Aff, runAff)
 import Control.Monad.Eff (Eff)
-import Control.Monad.Eff.Class (liftEff)
-import Control.Monad.Eff.Console (log, CONSOLE)
-import Control.Monad.Eff.Exception (catchException, EXCEPTION)
-import Control.Monad.Reader.Class (ask)
-import Control.Monad.Reader.Trans (runReaderT, ReaderT)
-import Control.Monad.ST (readSTRef, modifySTRef, newSTRef, runST)
-import Control.Monad.Trans (lift)
-import Data.Argonaut (Json)
-import Data.Array (uncons)
-import Data.Either (isRight, isLeft, Either, either)
-import Data.Either.Unsafe (fromRight)
-import Data.Function.Eff (runEffFn2, EffFn2)
-import Data.Functor (($>))
-import Data.Maybe (Maybe(Nothing))
+import Data.Array ((!!))
+import Data.Either (Either(Right, Left))
+import Data.Maybe (Maybe(Just))
 import Data.Maybe.Unsafe (fromJust)
-import Data.String (split)
-import Node.ChildProcess (CHILD_PROCESS, stderr, stdout, Exit(BySignal, Normally), onExit, defaultSpawnOptions, spawn)
-import Node.Encoding (Encoding(UTF8))
-import Node.FS (FS)
-import Node.Stream (onDataString)
-import PscIde (sendCommandR, load, cwd, NET)
-import PscIde.Command (Command(RebuildCmd), Message(Message))
-import Pscid.Keypress (Key(Key), onKeypress, initializeKeypresses)
-import Pscid.Options (PscidOptions, optionParser)
-import Pscid.Psa (psaPrinter)
-import Pscid.Server (restartServer, stopServer, startServer)
-import Pscid.Util ((∘))
+import Data.Options ((:=))
+import Prelude (map, pure, unit, const, (<>), bind, Unit)
+import PscIde (pursuitCompletion, NET, cwd)
+import PscIde.Command (PursuitCompletion(PursuitCompletion), Message(Message))
 
-type Pscid e a = ReaderT PscidOptions (Eff e) a
+type Screens =
+  { mainScreen   :: Element Screen
+  , searchScreen :: Element Form
+  , resultScreen :: Element Form
+  }
 
-main ∷ ∀ e. Eff ( err ∷ EXCEPTION, cp ∷ CHILD_PROCESS
-                , console ∷ CONSOLE , net ∷ NET
-                , avar ∷ AVAR, fs ∷ FS, process ∷ Process.PROCESS | e) Unit
-main = launchAff do
-  config@{ port, sourceDirectories } ← liftEff optionParser
-  liftEff (log "Starting psc-ide-server")
-  r ← attempt (startServer "psc-ide-server" port Nothing)
-  when (isLeft r) (restartServer port)
-  Message directory ← later' 100 do
-    load port [] []
-    fromRight <$> cwd port
-  liftEff do
-    runEffFn2 gaze
-      (sourceDirectories <#> \g → directory <> "/" <> g <> "/**/*.purs")
-      (\d → runReaderT (triggerRebuild d) config)
-    clearConsole
-    initializeKeypresses
-    onKeypress (\k → runReaderT (keyHandler k) config)
-    log ("Watching " <> directory <> " on port " <> show port)
-    log owl
-    log helpText
+type BlessEff e = Eff ( bless :: BLESS | e)
 
-owl ∷ String
-owl =
-  """
-  ___     ,_,        ___        ,_,     ___
- (o,o)   (o,o)   ,,,(o,o),,,   (o,o)   (o,o)
- {`"'}   {`"'}    ';:`-':;'    {`"'}   {`"'}
- -"-"-   -"-"-                 -"-"-   -"-"-
-  """
+mkScreens
+  :: forall e
+  . Element Screen
+  -> Element Form
+  -> Element Form
+  -> BlessEff e Screens
+mkScreens mainScreen searchScreen resultScreen = do
+  append mainScreen searchScreen
+  append mainScreen resultScreen
+  pure {mainScreen, searchScreen, resultScreen}
 
-helpText ∷ String
-helpText =
-  """
-Press b to run a full build (tries "npm run build" then "pulp build")
-Press t to test (tries "npm run test" then "pulp test")
-Press r to reset
-Press q to quit
-  """
+hideScreens :: forall e. Screens -> BlessEff e Unit
+hideScreens {searchScreen, resultScreen} = do
+  hide searchScreen
+  hide resultScreen
 
+main :: forall e. Eff ( bless :: BLESS, process :: P.PROCESS, net :: NET | e) Unit
+main = do
+  s <- screen defaultScreenOptions
+  title <- text (defaultTextOptions
+                     <> content := Just "PURR"
+                     <> top     := Just (colDistance 0)
+                     <> height  := Just (colDistance 1))
+  append s title
+  search <- form (defaultFormOptions
+                         <> label  := Just "Pursuit"
+                         <> bottom := Just (colDistance 0)
+                         <> width  := Just (percentDistance 100)
+                         <> height := Just (colDistance 2))
+  searchInput <- textbox (defaultTextboxOptions
+                           <> bottom := Just (colDistance 0)
+                           <> left   := Just (colDistance 2)
+                           <> height := Just (colDistance 1))
+  append search searchInput
+  pursuitResult <- form (defaultFormOptions
+                      <> label  := Just "Pursuit Results"
+                      <> top := Just (colDistance 2)
+                      <> width  := Just (percentDistance 100))
 
-keyHandler ∷ ∀ e. Key → Pscid ( console ∷ CONSOLE , cp ∷ CHILD_PROCESS
-                              , process ∷ Process.PROCESS , net ∷ NET
-                              , fs ∷ FS, avar ∷ AVAR | e) Unit
-keyHandler k = do
-  {port, buildCommand, testCommand} ← ask
-  case k of
-    Key {ctrl: false, name: "b", meta: false, shift: false} →
-      liftEff (runCommand "Build" buildCommand)
-    Key {ctrl: false, name: "t", meta: false, shift: false} →
-      liftEff (runCommand "Test" testCommand)
-    Key {ctrl: false, name: "r", meta: false, shift: false} → liftEff do
-      clearConsole
-      catchLog "Failed to restart server" $ launchAff do
-        restartServer port
-        load port [] []
-      log owl
-    Key {ctrl: false, name: "q", meta: false, shift: false} →
-      liftEff (log "Bye!" *> runAff exit exit (stopServer port))
-    Key {ctrl, name, meta, shift} →
-      liftEff (log name)
-  where
-    exit ∷ ∀ a eff. a → Eff (process ∷ Process.PROCESS | eff) Unit
-    exit = const (Process.exit 0)
+  psList <- pursuitList
+  psDetail <- detailView
+  append pursuitResult psList
+  append pursuitResult psDetail
+  screens <- mkScreens s search pursuitResult
+  hideScreens screens
 
-runCommand
-  ∷ ∀ e
-  . String
-  → String
-  → Eff (cp ∷ CHILD_PROCESS, console ∷ CONSOLE | e) Unit
-runCommand name command =
-   catchLog (name <> " threw an exception") $
-    runST do
-      let cmd = fromJust (uncons (split " " command))
-      output ← newSTRef ""
-      log ("Running: \"" <> command <> "\"")
-      cp ← spawn cmd.head cmd.tail defaultSpawnOptions
+  key s "q" (P.exit 0)
+  key s "p" do
+    hideScreens screens
+    show screens.searchScreen
+    clearValue searchInput
+    render screens.mainScreen
+    readInput searchInput (\i -> do
+                              runAff' (pursuitCompletion 4243 i) \cs -> case cs of
+                                Left _ -> pure unit
+                                Right completions -> do
+                                  let items = map showPC completions
+                                  setItems psList items
+                                  onSelect psList \ix -> do
+                                    setContent psDetail (showPrettyPC (fromJust (completions !! ix)))
+                                    render screens.mainScreen
+                                  hide search
+                                  show pursuitResult
+                                  render s
+                                  focus psList
+                              hide screens.searchScreen
+                              render s)
+  key s "l" do
+    runAff' (cwd 4243) \c -> case c of
+      Left err -> pure unit
+      Right (Message path) -> do
+        let values = ["Waow", "Rofl", "Copter", path]
+        setItems psList values
+        hide search
+        show pursuitResult
+        render s
+        focus psList
+  render s
 
-      let stout = stdout cp
-          sterr = stderr cp
+showPC :: PursuitCompletion -> String
+showPC (PursuitCompletion {type': ident, identifier: modu, module': ty, package}) =
+  "(" <> package <> ") " <> modu <> "." <> ident <> " :: " <> ty
 
-      onDataString stout UTF8 \s →
-        modifySTRef output (_ <> s) $> unit
+showPrettyPC :: PursuitCompletion -> String
+showPrettyPC (PursuitCompletion {type': ident, identifier: modu, module': ty, package}) =
+  "PACKAGE: " <> package <> "\nMODULE: " <> modu <> "\nIDENTIFIER: " <> ident <> "\nTYPE: " <> ty
 
-      onDataString sterr UTF8 \s →
-        modifySTRef output (_ <> s) $> unit
+runAff' :: forall e a. Aff e a -> (a -> Eff e Unit) -> Eff e Unit
+runAff' a s = runAff (const (pure unit)) s a
 
-      onExit cp \e → case e of
-        Normally 0 → logColored Green (name <> " successful!")
-        Normally code → do
-          log =<< readSTRef output
-          logColored Red (name <> " errored with code: " <> show code)
-        BySignal _       → pure unit
+detailView :: forall e. Eff (bless :: BLESS | e) (Element Text)
+detailView =
+  text (defaultTextOptions
+        <> top := Just (colDistance 7))
 
-triggerRebuild
-  ∷ ∀ e . String → Pscid ( cp ∷ CHILD_PROCESS, net ∷ NET
-                         , console ∷ CONSOLE, fs ∷ FS | e) Unit
-triggerRebuild file = do
-  {port, testCommand, testAfterRebuild} ← ask
-  lift ∘ catchLog "We couldn't talk to the server" $ launchAff do
-    errs ← fromRight <$> sendCommandR port (RebuildCmd file)
-    liftEff (printRebuildResult file errs)
-    liftEff ∘ when (testAfterRebuild && isRight errs) $
-      runCommand "Test" testCommand
-
-printRebuildResult
-  ∷ ∀ e. String
-  → Either Json Json
-  → Eff (console ∷ CONSOLE, fs ∷ FS | e) Unit
-printRebuildResult file errs =
-  catchLog "An error inside psaPrinter" do
-    clearConsole
-    Console.log ("Checking " <> file)
-    either (psaPrinter owl true) (psaPrinter owl false) errs
-
-foreign import gaze
-  ∷ ∀ eff
-  . EffFn2 (fs ∷ FS | eff)
-      (Array String)
-      (String → Eff (fs ∷ FS | eff) Unit)
-      Unit
-
-foreign import clearConsole ∷ ∀ e. Eff (console ∷ CONSOLE | e) Unit
-
-catchLog
-  ∷ ∀ e
-  . String
-  → Eff (console ∷ CONSOLE, err ∷ EXCEPTION | e) Unit
-  → Eff (console ∷ CONSOLE | e) Unit
-catchLog m = catchException (const (Console.error m))
-
-logColored ∷ ∀ e.Color → String → Eff (console ∷ CONSOLE | e) Unit
-logColored c = withGraphics log (foreground c)
+pursuitList :: forall e. Eff (bless :: BLESS | e) (Element (List Unit))
+pursuitList =
+  list (defaultListOptions
+        <> top         := Just (colDistance 1)
+        <> height      := Just (colDistance 5)
+        <> scrollable  := Just true
+        <> width       := Just (percentDistance 100)
+        <> interactive := Just true
+        <> style       := Just {fg: "blue", bg: "black"})
