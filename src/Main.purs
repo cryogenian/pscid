@@ -108,7 +108,15 @@ showPrettyPC :: PursuitCompletion -> String
 showPrettyPC (PursuitCompletion {type': ident, identifier: modu, module': ty, package}) =
   "PACKAGE: " <> package <> "\nMODULE: " <> modu <> "\nIDENTIFIER: " <> ident <> "\nTYPE: " <> ty
 
-runAff' :: forall e a. Aff e a -> (a -> Eff e Unit) -> Eff e Unit
+installedPackages ∷ ∀ e. Eff ( fs ∷ FS | e ) (Array String)
+installedPackages = do
+  f ← readJsonFile "bower.json"
+  case f of
+    Nothing → pure []
+    Just bowerFile → pure
+      (flip (foldJsonObject []) bowerFile (fromRight ∘ (_ .? "dependencies")))
+
+runAff' ∷ ∀ e a. Aff e a → (a → Eff e Unit) → Eff e Unit
 runAff' a s = runAff (const (pure unit)) s a
 
 detailView :: forall e. Eff (bless :: BLESS | e) (Element Text)
@@ -125,3 +133,14 @@ pursuitList =
         <> width       := Just (percentDistance 100)
         <> interactive := Just true
         <> style       := Just {fg: "blue", bg: "black"})
+
+try ∷ ∀ a e. Eff (err ∷ EXCEPTION | e) a → Eff e (Either Error a)
+try action = catchException (pure ∘ Left) (Right <$> action)
+
+tryShush ∷ ∀ a e. Eff (err ∷ EXCEPTION | e) a → Eff e (Maybe a)
+tryShush = map shush ∘ try
+
+readJsonFile ∷ ∀ eff. String → Eff ( fs ∷ FS | eff ) (Maybe Json)
+readJsonFile path = do
+  text ← tryShush (readTextFile UTF8 path)
+  pure (shush ∘ jsonParser =<< text)
