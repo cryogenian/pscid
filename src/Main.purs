@@ -2,6 +2,8 @@ module Main where
 
 import Blessed
 import Node.Process as P
+import Ansi.Codes (GraphicsParam(Reset), EscapeCode(Graphics), escapeCodeToString, Color(Green))
+import Ansi.Output (foreground)
 import Control.Bind ((=<<))
 import Control.Monad.Aff (Aff, runAff)
 import Control.Monad.Eff (Eff)
@@ -9,6 +11,7 @@ import Control.Monad.Eff.Exception (Error, catchException, EXCEPTION)
 import Data.Argonaut (Json, jsonParser, foldJsonObject, (.?))
 import Data.Array ((!!))
 import Data.Either (either, Either(Right, Left))
+import Data.Foldable (elem)
 import Data.Maybe (fromMaybe, Maybe(Nothing, Just))
 import Data.Options ((:=))
 import Data.StrMap (StrMap, keys)
@@ -44,7 +47,7 @@ hideScreens {searchScreen, resultScreen} = do
   hide searchScreen
   hide resultScreen
 
-main ∷ ∀ e. Eff ( bless ∷ BLESS, process ∷ P.PROCESS, net ∷ NET | e) Unit
+main ∷ ∀ e. Eff ( bless ∷ BLESS, process ∷ P.PROCESS, net ∷ NET, fs ∷ FS | e) Unit
 main = do
   s ← screen defaultScreenOptions
   title ← text (defaultTextOptions
@@ -84,14 +87,12 @@ main = do
                               runAff' (pursuitCompletion 4243 i) \cs → case cs of
                                 Left _ → pure unit
                                 Right completions → do
-                                  let items = map showPC completions
+                                  installed ← installedPackages
+                                  let items = map (showPC installed) completions
                                   setItems psList items
                                   onScroll psList \ix → do
                                     setContent psDetail (fromMaybe "" (showPrettyPC <$> (completions !! ix)))
                                     render screens.mainScreen
-                                  -- onSelect psList \ix → do
-                                  --   setContent psDetail (showPrettyPC (fromJust (completions !! ix)))
-                                  --   render screens.mainScreen
                                   hide screens.searchScreen
                                   show screens.resultScreen
                                   render screens.mainScreen
@@ -99,9 +100,13 @@ main = do
                               hide screens.searchScreen
                               render s)
 
-showPC ∷ PursuitCompletion → String
-showPC (PursuitCompletion {type': ident, identifier: modu, module': ty, package}) =
-  "(" <> package <> ") " <> modu <> "." <> ident
+showPC ∷ Array String → PursuitCompletion → String
+showPC installed (PursuitCompletion {type': ident, identifier: modu, module': ty, package}) =
+  let
+    isInstalled = package `elem` installed
+  in
+   (if isInstalled then colored Green "I" else " ") <>
+   " (" <> package <> ") " <> modu <> "." <> ident
 
 showPrettyPC ∷ PursuitCompletion → String
 showPrettyPC (PursuitCompletion {type': ident, identifier: modu, module': ty, package}) =
@@ -148,3 +153,7 @@ readJsonFile ∷ ∀ eff. String → Eff ( fs ∷ FS | eff ) (Maybe Json)
 readJsonFile path = do
   text ← tryShush (readTextFile UTF8 path)
   pure (shush ∘ jsonParser =<< text)
+
+colored ∷ Color → String → String
+colored c s =
+  escapeCodeToString (Graphics (foreground c)) <> s <> escapeCodeToString (Graphics [Reset])
