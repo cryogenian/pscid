@@ -8,14 +8,14 @@ import Control.Monad.Eff (Eff)
 import Control.Monad.Eff.Exception (Error, catchException, EXCEPTION)
 import Data.Argonaut (Json, jsonParser, foldJsonObject, (.?))
 import Data.Array ((!!))
-import Data.Either (Either(Right, Left))
-import Data.Either.Unsafe (fromRight)
+import Data.Either (either, Either(Right, Left))
 import Data.Maybe (fromMaybe, Maybe(Nothing, Just))
 import Data.Options ((:=))
+import Data.StrMap (StrMap, keys)
 import Node.Encoding (Encoding(UTF8))
 import Node.FS (FS)
 import Node.FS.Sync (readTextFile)
-import Prelude (flip, (<$>), map, pure, unit, const, (<>), bind, Unit)
+import Prelude (id, flip, (<$>), map, pure, unit, const, (<>), bind, Unit)
 import PscIde (pursuitCompletion, NET)
 import PscIde.Command (PursuitCompletion(PursuitCompletion))
 import Pscid.Util (shush, (∘))
@@ -105,15 +105,20 @@ showPC (PursuitCompletion {type': ident, identifier: modu, module': ty, package}
 
 showPrettyPC ∷ PursuitCompletion → String
 showPrettyPC (PursuitCompletion {type': ident, identifier: modu, module': ty, package}) =
-  "PACKAGE: " <> package <> "\nMODULE: " <> modu <> "\nIDENTIFIER: " <> ident <> "\nTYPE: " <> ty
+  "PACKAGE: " <> package <>
+  "\nMODULE: " <> modu <>
+  "\nIDENTIFIER: " <> ident <>
+  "\nTYPE: " <> ty
 
 installedPackages ∷ ∀ e. Eff ( fs ∷ FS | e ) (Array String)
 installedPackages = do
   f ← readJsonFile "bower.json"
   case f of
     Nothing → pure []
-    Just bowerFile → pure
-      (flip (foldJsonObject []) bowerFile (fromRight ∘ (_ .? "dependencies")))
+    Just bowerFile → pure (flip (foldJsonObject []) bowerFile \o →
+                              either (const []) id do
+                                deps ∷ StrMap String ← o .? "dependencies"
+                                pure (keys deps))
 
 runAff' ∷ ∀ e a. Aff e a → (a → Eff e Unit) → Eff e Unit
 runAff' a s = runAff (const (pure unit)) s a
