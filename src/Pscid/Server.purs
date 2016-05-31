@@ -9,6 +9,7 @@ import Control.Monad.Aff (attempt, Aff)
 import Control.Monad.Aff.AVar (AVAR)
 import Control.Monad.Eff.Class (liftEff)
 import Control.Monad.Eff.Console (CONSOLE, log)
+import Control.Monad.Eff.Ref (REF)
 import Data.Either (Either(Right, Left))
 import Data.Maybe (Maybe(Nothing))
 import Node.ChildProcess (CHILD_PROCESS)
@@ -17,10 +18,13 @@ import PscIde.Server (startServer, stopServer)
 
 restartServer
   ∷ forall e
-    . Int
-    → Aff ( cp ∷ CHILD_PROCESS , net ∷ NET
-          , console ∷ CONSOLE , avar ∷ AVAR
-          , process ∷ Process.PROCESS | e) Unit
+  . Int
+  → Aff ( cp ∷ CHILD_PROCESS
+        , net ∷ NET
+        , console ∷ CONSOLE
+        , avar ∷ AVAR
+        , process ∷ Process.PROCESS
+        , ref ∷ REF| e) Unit
 restartServer port = do
   attempt (stopServer port)
   r ← attempt (startServer "psc-ide-server" port Nothing)
